@@ -80,6 +80,7 @@ namespace plume {
         VK_KHR_SAMPLER_MIRROR_CLAMP_TO_EDGE_EXTENSION_NAME,
         VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
         VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
+        VK_KHR_RAY_QUERY_EXTENSION_NAME, // JFG PORT: inline ray tracing in any shader (capabilities.rayQuery)
         VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME,
         VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
         VK_EXT_SAMPLE_LOCATIONS_EXTENSION_NAME,
@@ -3900,6 +3901,15 @@ namespace plume {
             featuresChain = &accelerationStructureFeatures;
         }
 
+        // JFG PORT: inline ray queries (RayQuery in raster and compute shaders), with acceleration structures.
+        VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures = {};
+        const bool rayQueryFound = rayTracingFound && (supportedOptionalExtensions.find(VK_KHR_RAY_QUERY_EXTENSION_NAME) != supportedOptionalExtensions.end());
+        if (rayQueryFound) {
+            rayQueryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+            rayQueryFeatures.pNext = featuresChain;
+            featuresChain = &rayQueryFeatures;
+        }
+
         VkPhysicalDeviceFeatures2 deviceFeatures = {};
         deviceFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
         deviceFeatures.pNext = featuresChain;
@@ -3934,6 +3944,12 @@ namespace plume {
 
             accelerationStructureFeatures.pNext = createDeviceChain;
             createDeviceChain = &accelerationStructureFeatures;
+        }
+
+        const bool rayQuerySupported = rayTracingSupported && rayQueryFeatures.rayQuery; // JFG PORT
+        if (rayQuerySupported) {
+            rayQueryFeatures.pNext = createDeviceChain;
+            createDeviceChain = &rayQueryFeatures;
         }
 
         const bool descriptorIndexingSupported = indexingFeatures.descriptorBindingPartiallyBound && indexingFeatures.descriptorBindingVariableDescriptorCount && indexingFeatures.runtimeDescriptorArray;
@@ -4127,6 +4143,7 @@ namespace plume {
         capabilities.geometryShader = deviceFeatures.features.geometryShader;
         capabilities.raytracing = rayTracingSupported;
         capabilities.raytracingStateUpdate = false;
+        capabilities.rayQuery = rayQuerySupported; // JFG PORT
         capabilities.sampleLocations = (sampleLocationProperties.sampleLocationSampleCounts != 0);
         capabilities.resolveRegion = true;
         capabilities.resolveModes = false;
