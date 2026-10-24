@@ -3757,6 +3757,7 @@ namespace plume {
                 capabilities.geometryShader = true;
                 capabilities.raytracing = rtSupportOption;
                 capabilities.raytracingStateUpdate = rtStateUpdateSupportOption;
+                capabilities.rayQuery = rtStateUpdateSupportOption; // JFG PORT: inline ray queries come with tier 1.1
                 capabilities.sampleLocations = samplePositionsOption;
                 capabilities.resolveRegion = resolveRegionOption;
                 capabilities.resolveModes = samplePositionsOption; // Resolve modes require sample positions support.

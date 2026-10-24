@@ -1768,6 +1768,7 @@ namespace plume {
         // Raytracing.
         bool raytracing = false;
         bool raytracingStateUpdate = false;
+        bool rayQuery = false; // JFG PORT: inline ray tracing (RayQuery) in any shader
 
         // MSAA.
         bool sampleLocations = false;
