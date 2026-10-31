@@ -2118,6 +2118,9 @@ namespace plume {
         }
 #   elif defined(__ANDROID__)
         assert(desc.renderWindow != nullptr);
+        // SDL releases its reference when Android destroys the surface; this one keeps the handle valid until setWindow
+        // or the destructor lets go of it.
+        ANativeWindow_acquire(desc.renderWindow);
         VkAndroidSurfaceCreateInfoKHR surfaceCreateInfo = {};
         surfaceCreateInfo.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
         surfaceCreateInfo.window = desc.renderWindow;
@@ -2262,6 +2265,12 @@ namespace plume {
             VulkanInterface *renderInterface = commandQueue->device->renderInterface;
             vkDestroySurfaceKHR(renderInterface->instance, surface, nullptr);
         }
+
+#   if defined(__ANDROID__)
+        if (desc.renderWindow != nullptr) {
+            ANativeWindow_release(desc.renderWindow);
+        }
+#   endif
 
         // Remove tracking from the parent command queue.
         commandQueue->swapChains.erase(this);
@@ -2456,6 +2465,49 @@ namespace plume {
         return desc.renderWindow;
     }
 
+#   if defined(__ANDROID__)
+    bool VulkanSwapChain::setWindow(RenderWindow window) {
+        // The old surface goes with the old window; the swap chain is made again by the next resize().
+        releaseImageViews();
+        releaseSwapChain();
+
+        VulkanInterface *renderInterface = commandQueue->device->renderInterface;
+        if (surface != VK_NULL_HANDLE) {
+            vkDestroySurfaceKHR(renderInterface->instance, surface, nullptr);
+            surface = VK_NULL_HANDLE;
+        }
+
+        if (desc.renderWindow != nullptr) {
+            ANativeWindow_release(desc.renderWindow);
+        }
+
+        desc.renderWindow = window;
+        if (window == nullptr) {
+            return true;
+        }
+
+        ANativeWindow_acquire(window);
+        VkAndroidSurfaceCreateInfoKHR surfaceCreateInfo = {};
+        surfaceCreateInfo.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
+        surfaceCreateInfo.window = window;
+        VkResult res = vkCreateAndroidSurfaceKHR(renderInterface->instance, &surfaceCreateInfo, nullptr, &surface);
+        if (res != VK_SUCCESS) {
+            fprintf(stderr, "vkCreateAndroidSurfaceKHR failed with error code 0x%X.\n", res);
+            surface = VK_NULL_HANDLE;
+            return false;
+        }
+
+        VkBool32 presentSupported = false;
+        res = vkGetPhysicalDeviceSurfaceSupportKHR(commandQueue->device->physicalDevice, commandQueue->familyIndex, surface, &presentSupported);
+        if ((res != VK_SUCCESS) || !presentSupported) {
+            fprintf(stderr, "The new window's surface can't be presented to (0x%X).\n", res);
+            return false;
+        }
+
+        return true;
+    }
+#   endif
+
     bool VulkanSwapChain::isEmpty() const {
         return (vk == VK_NULL_HANDLE) || (width == 0) || (height == 0);
     }
@@ -2484,8 +2536,11 @@ namespace plume {
         // pixel-sized Vulkan drawable dimensions since SDL 2.0.6.
         SDL_Vulkan_GetDrawableSize(desc.renderWindow, (int *)(&dstWidth), (int *)(&dstHeight));
 #   elif defined(__ANDROID__)
-        dstWidth = ANativeWindow_getWidth(desc.renderWindow);
-        dstHeight = ANativeWindow_getHeight(desc.renderWindow);
+        // No window (detached by setWindow), or one whose surface is gone (negative error codes): no size.
+        const int32_t windowWidth = (desc.renderWindow != nullptr) ? ANativeWindow_getWidth(desc.renderWindow) : 0;
+        const int32_t windowHeight = (desc.renderWindow != nullptr) ? ANativeWindow_getHeight(desc.renderWindow) : 0;
+        dstWidth = uint32_t(std::max(windowWidth, 0));
+        dstHeight = uint32_t(std::max(windowHeight, 0));
 #   elif defined(__linux__)
         XWindowAttributes attributes;
         XGetWindowAttributes(desc.renderWindow.display, desc.renderWindow.window, &attributes);

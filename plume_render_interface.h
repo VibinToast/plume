@@ -101,6 +101,11 @@ namespace plume {
         virtual RenderWindow getWindow() const = 0;
         virtual bool isEmpty() const = 0;
 
+        // Moves the swap chain to another window of the same kind, or detaches it (an empty window) while there is none,
+        // as for an Android app in the background, whose window is replaced when it comes back. The next resize() makes
+        // the swap chain for the new window. Returns false when the backend doesn't support it or the window can't be used.
+        virtual bool setWindow(RenderWindow window) { (void)(window); return false; }
+
         // Only valid if displayTiming is enabled in capabilities.
         virtual uint32_t getRefreshRate() const = 0;
     };
