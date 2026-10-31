@@ -1900,7 +1900,13 @@ namespace plume {
             boundlessRangeSize = std::max(desc.boundlessRangeSize, 1U);
 
             const RenderDescriptorRange &lastDescriptorRange = desc.descriptorRanges[desc.descriptorRangesCount - 1];
+#       if defined(__ANDROID__)
+            // Adreno fails variable-count allocations (VK_ERROR_FRAGMENTATION) from a pool sized to just the variable
+            // count; reserve the layout's whole declared range. The set itself still gets the variable count.
+            typeCounts[toVk(lastDescriptorRange.type)] += std::max(boundlessRangeSize, lastDescriptorRange.count);
+#       else
             typeCounts[toVk(lastDescriptorRange.type)] += boundlessRangeSize;
+#       endif
             rangeCount--;
         }
 
@@ -1932,7 +1938,9 @@ namespace plume {
 
         VkResult res = vkAllocateDescriptorSets(device->vk, &allocateInfo, &vk);
         if (res != VK_SUCCESS) {
-            fprintf(stderr, "vkAllocateDescriptorSets failed with error code 0x%X.\n", res);
+            fprintf(stderr, "vkAllocateDescriptorSets failed with error code 0x%X (ranges %u, boundless %d, variable count %u, last range count %u).\n",
+                res, desc.descriptorRangesCount, int(desc.lastRangeIsBoundless), boundlessRangeSize,
+                (desc.descriptorRangesCount > 0) ? desc.descriptorRanges[desc.descriptorRangesCount - 1].count : 0U);
             return;
         }
     }
@@ -2022,6 +2030,11 @@ namespace plume {
     void VulkanDescriptorSet::setDescriptor(uint32_t descriptorIndex, const VkDescriptorBufferInfo *bufferInfo, const VkDescriptorImageInfo *imageInfo, const VkBufferView *texelBufferView, void *pNext) {
         assert(descriptorIndex < setLayout->descriptorBindingIndices.size());
 
+        // A set whose allocation failed has no handle; writing to it crashes some drivers (Adreno).
+        if (vk == VK_NULL_HANDLE) {
+            return;
+        }
+
         const uint32_t indexBase = setLayout->descriptorIndexBases[descriptorIndex];
         const uint32_t bindingIndex = setLayout->descriptorBindingIndices[descriptorIndex];
         const VkDescriptorSetLayoutBinding &setLayoutBinding = setLayout->setBindings[bindingIndex];
@@ -2105,6 +2118,9 @@ namespace plume {
         }
 #   elif defined(__ANDROID__)
         assert(desc.renderWindow != nullptr);
+        // SDL releases its reference when Android destroys the surface; this one keeps the handle valid until setWindow
+        // or the destructor lets go of it.
+        ANativeWindow_acquire(desc.renderWindow);
         VkAndroidSurfaceCreateInfoKHR surfaceCreateInfo = {};
         surfaceCreateInfo.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
         surfaceCreateInfo.window = desc.renderWindow;
@@ -2249,6 +2265,12 @@ namespace plume {
             VulkanInterface *renderInterface = commandQueue->device->renderInterface;
             vkDestroySurfaceKHR(renderInterface->instance, surface, nullptr);
         }
+
+#   if defined(__ANDROID__)
+        if (desc.renderWindow != nullptr) {
+            ANativeWindow_release(desc.renderWindow);
+        }
+#   endif
 
         // Remove tracking from the parent command queue.
         commandQueue->swapChains.erase(this);
@@ -2443,11 +2465,59 @@ namespace plume {
         return desc.renderWindow;
     }
 
+#   if defined(__ANDROID__)
+    bool VulkanSwapChain::setWindow(RenderWindow window) {
+        // The old surface goes with the old window; the swap chain is made again by the next resize().
+        releaseImageViews();
+        releaseSwapChain();
+
+        VulkanInterface *renderInterface = commandQueue->device->renderInterface;
+        if (surface != VK_NULL_HANDLE) {
+            vkDestroySurfaceKHR(renderInterface->instance, surface, nullptr);
+            surface = VK_NULL_HANDLE;
+        }
+
+        if (desc.renderWindow != nullptr) {
+            ANativeWindow_release(desc.renderWindow);
+        }
+
+        desc.renderWindow = window;
+        if (window == nullptr) {
+            return true;
+        }
+
+        ANativeWindow_acquire(window);
+        VkAndroidSurfaceCreateInfoKHR surfaceCreateInfo = {};
+        surfaceCreateInfo.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
+        surfaceCreateInfo.window = window;
+        VkResult res = vkCreateAndroidSurfaceKHR(renderInterface->instance, &surfaceCreateInfo, nullptr, &surface);
+        if (res != VK_SUCCESS) {
+            fprintf(stderr, "vkCreateAndroidSurfaceKHR failed with error code 0x%X.\n", res);
+            surface = VK_NULL_HANDLE;
+            return false;
+        }
+
+        VkBool32 presentSupported = false;
+        res = vkGetPhysicalDeviceSurfaceSupportKHR(commandQueue->device->physicalDevice, commandQueue->familyIndex, surface, &presentSupported);
+        if ((res != VK_SUCCESS) || !presentSupported) {
+            fprintf(stderr, "The new window's surface can't be presented to (0x%X).\n", res);
+            return false;
+        }
+
+        return true;
+    }
+#   endif
+
     bool VulkanSwapChain::isEmpty() const {
         return (vk == VK_NULL_HANDLE) || (width == 0) || (height == 0);
     }
 
     uint32_t VulkanSwapChain::getRefreshRate() const {
+        // No swap chain (a failed resize, or no window): the driver would dereference it.
+        if (vk == VK_NULL_HANDLE) {
+            return 0;
+        }
+
         VkRefreshCycleDurationGOOGLE refreshCycle = {};
         VkResult res = vkGetRefreshCycleDurationGOOGLE(commandQueue->device->vk, vk, &refreshCycle);
         if (res != VK_SUCCESS) {
@@ -2471,8 +2541,11 @@ namespace plume {
         // pixel-sized Vulkan drawable dimensions since SDL 2.0.6.
         SDL_Vulkan_GetDrawableSize(desc.renderWindow, (int *)(&dstWidth), (int *)(&dstHeight));
 #   elif defined(__ANDROID__)
-        dstWidth = ANativeWindow_getWidth(desc.renderWindow);
-        dstHeight = ANativeWindow_getHeight(desc.renderWindow);
+        // No window (detached by setWindow), or one whose surface is gone (negative error codes): no size.
+        const int32_t windowWidth = (desc.renderWindow != nullptr) ? ANativeWindow_getWidth(desc.renderWindow) : 0;
+        const int32_t windowHeight = (desc.renderWindow != nullptr) ? ANativeWindow_getHeight(desc.renderWindow) : 0;
+        dstWidth = uint32_t(std::max(windowWidth, 0));
+        dstHeight = uint32_t(std::max(windowHeight, 0));
 #   elif defined(__linux__)
         XWindowAttributes attributes;
         XGetWindowAttributes(desc.renderWindow.display, desc.renderWindow.window, &attributes);
@@ -3082,12 +3155,28 @@ namespace plume {
     }
 
     void VulkanCommandList::setScissors(const RenderRect *scissorRects, uint32_t count) {
+        // Clamp to the framebuffer: negative or oversized scissors are invalid and some mobile drivers fault on them.
+        auto toVkScissor = [this](const RenderRect &rect) {
+            int32_t left = rect.left;
+            int32_t top = rect.top;
+            int32_t right = rect.right;
+            int32_t bottom = rect.bottom;
+            if (targetFramebuffer != nullptr) {
+                left = std::clamp(left, 0, int32_t(targetFramebuffer->width));
+                top = std::clamp(top, 0, int32_t(targetFramebuffer->height));
+                right = std::clamp(right, left, int32_t(targetFramebuffer->width));
+                bottom = std::clamp(bottom, top, int32_t(targetFramebuffer->height));
+            }
+
+            return VkRect2D{ VkOffset2D{ left, top }, VkExtent2D{ uint32_t(right - left), uint32_t(bottom - top) } };
+        };
+
         if (count > 1) {
             thread_local std::vector<VkRect2D> scissorVector;
             scissorVector.clear();
 
             for (uint32_t i = 0; i < count; i++) {
-                scissorVector.emplace_back(VkRect2D{ VkOffset2D{ scissorRects[i].left, scissorRects[i].top }, VkExtent2D{ uint32_t(scissorRects[i].right - scissorRects[i].left), uint32_t(scissorRects[i].bottom - scissorRects[i].top) } });
+                scissorVector.emplace_back(toVkScissor(scissorRects[i]));
             }
 
             if (!scissorVector.empty()) {
@@ -3096,7 +3185,7 @@ namespace plume {
         }
         else {
             // Single element fast path.
-            VkRect2D scissor = VkRect2D{ VkOffset2D{ scissorRects[0].left, scissorRects[0].top }, VkExtent2D{ uint32_t(scissorRects[0].right - scissorRects[0].left), uint32_t(scissorRects[0].bottom - scissorRects[0].top) } };
+            VkRect2D scissor = toVkScissor(scissorRects[0]);
             vkCmdSetScissor(vk, 0, 1, &scissor);
         }
     }
@@ -3122,11 +3211,20 @@ namespace plume {
 
         if (clearRectsCount > 0) {
             for (uint32_t i = 0; i < clearRectsCount; i++) {
+                // Clears must stay inside the framebuffer; out-of-bounds rects are invalid and fault some mobile GPUs.
+                const int32_t left = std::clamp(clearRects[i].left, 0, int32_t(width));
+                const int32_t top = std::clamp(clearRects[i].top, 0, int32_t(height));
+                const int32_t right = std::clamp(clearRects[i].right, left, int32_t(width));
+                const int32_t bottom = std::clamp(clearRects[i].bottom, top, int32_t(height));
+                if ((right == left) || (bottom == top)) {
+                    continue;
+                }
+
                 VkClearRect clearRect;
-                clearRect.rect.offset.x = clearRects[i].left;
-                clearRect.rect.offset.y = clearRects[i].top;
-                clearRect.rect.extent.width = clearRects[i].right - clearRects[i].left;
-                clearRect.rect.extent.height = clearRects[i].bottom - clearRects[i].top;
+                clearRect.rect.offset.x = left;
+                clearRect.rect.offset.y = top;
+                clearRect.rect.extent.width = right - left;
+                clearRect.rect.extent.height = bottom - top;
                 clearRect.baseArrayLayer = 0;
                 clearRect.layerCount = 1;
                 rectVector.emplace_back(clearRect);
@@ -3162,6 +3260,10 @@ namespace plume {
         rgba[3] = colorValue.a;
         attachment.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         attachment.colorAttachment = attachmentIndex;
+        if (rectVector.empty()) {
+            return;
+        }
+
         vkCmdClearAttachments(vk, 1, &attachment, uint32_t(rectVector.size()), rectVector.data());
     }
 
@@ -3183,6 +3285,10 @@ namespace plume {
         }
         if (clearStencil) {
             attachment.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+        }
+
+        if (rectVector.empty()) {
+            return;
         }
 
         vkCmdClearAttachments(vk, 1, &attachment, uint32_t(rectVector.size()), rectVector.data());
@@ -4006,8 +4112,14 @@ namespace plume {
             for (uint32_t i = 0; i < queueFamilyCount; i++) {
                 const VkQueueFamilyProperties &props = queueFamilyProperties[i];
 
-                // The family queue flags must contain all the flags required by the command list type.
-                if ((props.queueFlags & flags) != flags) {
+                // The family queue flags must contain all the flags required by the command list type. Graphics and
+                // compute queues support transfers even when the bit isn't reported, which some Android drivers omit.
+                VkQueueFlags queueFlags = props.queueFlags;
+                if ((queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) != 0) {
+                    queueFlags |= VK_QUEUE_TRANSFER_BIT;
+                }
+
+                if ((queueFlags & flags) != flags) {
                     continue;
                 }
 

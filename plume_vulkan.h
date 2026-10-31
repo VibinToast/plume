@@ -256,6 +256,9 @@ namespace plume {
         uint32_t getTextureCount() const override;
         bool acquireTexture(RenderCommandSemaphore *signalSemaphore, uint32_t *textureIndex) override;
         RenderWindow getWindow() const override;
+#   if defined(__ANDROID__)
+        bool setWindow(RenderWindow window) override;
+#   endif
         bool isEmpty() const override;
         uint32_t getRefreshRate() const override;
         void getWindowSize(uint32_t &dstWidth, uint32_t &dstHeight) const;
