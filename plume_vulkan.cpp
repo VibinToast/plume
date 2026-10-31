@@ -1900,7 +1900,13 @@ namespace plume {
             boundlessRangeSize = std::max(desc.boundlessRangeSize, 1U);
 
             const RenderDescriptorRange &lastDescriptorRange = desc.descriptorRanges[desc.descriptorRangesCount - 1];
+#       if defined(__ANDROID__)
+            // Adreno fails variable-count allocations (VK_ERROR_FRAGMENTATION) from a pool sized to just the variable
+            // count; reserve the layout's whole declared range. The set itself still gets the variable count.
+            typeCounts[toVk(lastDescriptorRange.type)] += std::max(boundlessRangeSize, lastDescriptorRange.count);
+#       else
             typeCounts[toVk(lastDescriptorRange.type)] += boundlessRangeSize;
+#       endif
             rangeCount--;
         }
 
