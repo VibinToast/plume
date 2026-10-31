@@ -2513,6 +2513,11 @@ namespace plume {
     }
 
     uint32_t VulkanSwapChain::getRefreshRate() const {
+        // No swap chain (a failed resize, or no window): the driver would dereference it.
+        if (vk == VK_NULL_HANDLE) {
+            return 0;
+        }
+
         VkRefreshCycleDurationGOOGLE refreshCycle = {};
         VkResult res = vkGetRefreshCycleDurationGOOGLE(commandQueue->device->vk, vk, &refreshCycle);
         if (res != VK_SUCCESS) {
